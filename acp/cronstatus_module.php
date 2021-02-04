@@ -12,12 +12,39 @@ namespace forumhulp\cronstatus\acp;
 class cronstatus_module
 {
 	public $u_action;
+	public $page_title;
+	public $tpl_name;
+
+	/** @var cronstatus_helper */
+	protected $helper;
+
+	/** @var \phpbb\config\config */
+	protected $config;
+
+	/** @var \phpbb\user */
+	protected $user;
+
+	/** @var \phpbb\template\template */
+	protected $template;
+
+	/** @var \phpbb\request\request_interface */
+	protected $request;
+
+	/** @var \phpbb\event\dispatcher_interface */
+	protected $phpbb_dispatcher;
 
 	public function main($id, $mode)
 	{
 		/** @var \phpbb\config\config $config */
 		/** @var \phpbb\request\request_interface $request */
-		global $db, $config, $user, $cache, $template, $request, $phpbb_root_path, $phpEx, $phpbb_container, $phpbb_dispatcher;
+		global $config, $user, $template, $request, $phpbb_root_path, $phpEx, $phpbb_container, $phpbb_dispatcher;
+
+		$this->helper = new cronstatus_helper();
+		$this->config = $config;
+		$this->user = $user;
+		$this->template = $template;
+		$this->request = $request;
+		$this->phpbb_dispatcher = $phpbb_dispatcher;
 
 		$this->page_title = $user->lang['ACP_CRON_STATUS_TITLE'];
 		$this->tpl_name = 'acp_cronstatus';
@@ -39,6 +66,20 @@ class cronstatus_module
 			case 'details':
 				$user->add_lang_ext('forumhulp/cronstatus', 'info_acp_cronstatus');
 				$phpbb_container->get('forumhulp.helper')->detail('forumhulp/cronstatus');
+
+				if ($request->is_ajax())
+				{
+					$template->assign_vars(array(
+						'IS_AJAX' => true,
+					));
+				}
+				else
+				{
+					$template->assign_vars(array(
+						'U_BACK' => $this->u_action,
+					));
+				}
+
 				$this->tpl_name = 'acp_ext_details';
 			break;
 
@@ -79,69 +120,8 @@ class cronstatus_module
 				meta_refresh(60, $this->u_action . '&amp;sk=' . $sk . '&amp;sd='. $sd);
 			}
 
-			$task_array = array();
-			$tasks = $phpbb_container->get('cron.manager')->get_tasks();
-
-			$rows = $phpbb_container->get('forumhulp.cronstatus.listener')->get_cron_tasks($cronlock);
-			if (sizeof($tasks) && is_array($rows))
-			{
-				foreach ($tasks as $task)
-				{
-					$task_name = $task->get_name();
-					if (empty($task_name))
-					{
-						continue;
-					}
-
-					$task_date = -1;
-					$name = $task_name;
-					$this->get_task_params($rows, $name, $task_date);
-					$new_task_date = $this->get_new_task_date($rows, $task_date, $name);
-
-					/**
-					* Event to modify task variables before displaying cron information
-					*
-					* @event forumhulp.cronstatus.modify_cron_task
-					* @var object task          Task object
-					* @var object task_name     Task name ($task->get_name())
-					* @var object name          Task name for new task date
-					* @var object task_date     Last task date
-					* @var object new_task_date Next task date
-					* @since 3.1.0-RC3
-					* @changed 3.1.1 Added new_task_date variable
-					*/
-					$vars = array('task', 'task_name', 'name', 'task_date', 'new_task_date');
-					extract($phpbb_dispatcher->trigger_event('forumhulp.cronstatus.modify_cron_task', compact($vars)));
-
-					$task_array[] = array(
-						'task_sort'			=> ($task->is_ready()) ? 'ready' : (($task_date) ? 'not_ready' : 'never_started'),
-						'display_name'		=> $task_name,
-						'task_date'			=> $task_date,
-						'task_date_print'	=> ($task_date == -1) ? $user->lang['CRON_TASK_AUTO'] : (($task_date) ?
-												$user->format_date($task_date, $config['cronstatus_dateformat']) : $user->lang['CRON_TASK_NEVER_STARTED']),
-						'new_date'			=> $new_task_date,
-						'new_date_print'	=> ($new_task_date > 0 && ($name != 'queue_interval' && $name != 'plupload')) ?
-												$user->format_date($new_task_date, $config['cronstatus_dateformat']) : '-',
-						'task_ok'			=> ($task_date > 0 && ($new_task_date > time() || ($name == 'queue_interval' || $name == 'plupload'))) ? false : true,
-						'locked'			=> ($config['cron_lock'] && $cronlock == $task_name) ? true : false,
-					);
-				}
-				unset($tasks, $rows);
-
-				$task_array = $this->array_sort($task_array, $sk, (($sd == 'a') ? SORT_ASC : SORT_DESC));
-
-				foreach ($task_array as $row)
-				{
-					$template->assign_block_vars($row['task_sort'], array(
-						'DISPLAY_NAME'	=> $row['display_name'],
-						'TASK_DATE'		=> $row['task_date_print'],
-						'NEW_DATE'		=> $row['new_date_print'],
-						'TASK_OK'		=> $row['task_ok'],
-						'LOCKED'		=> $row['locked'],
-						'CRON_TASK_RUN'	=> ($request->is_ajax()) ? '' : (($row['display_name'] != $cron_type) ? '<a href="' . $this->u_action . '&amp;cron_type=' . $row['display_name'] . '&amp;sk=' . $sk . '&amp;sd='. $sd . '" class="cron_run_link">'.$user->lang['CRON_TASK_RUN'].'</a>' : '<span class="cron_running_update">'.$user->lang['CRON_TASK_RUNNING'].'</span>'),
-					));
-				}
-			}
+			$this->show_tasks($phpbb_container, $sk, $sd, $cron_type);
+			
 			$cron_url = append_sid($phpbb_root_path . 'cron.' . $phpEx, false, false); // This is used in JavaScript (no &amp;).
 			$template->assign_vars(array(
 				'U_ACTION'		=> $this->u_action,
@@ -154,133 +134,98 @@ class cronstatus_module
 		}
 	}
 
+
 	/**
-	 * Identifies current Cron task's name and the time of its last execution
+	 * Assigns template parameters for available Cron tasks
 	 *
-	 * @param array   $rows      Array with fetched parameters for Cron tasks
-	 * @param string &$name      Current Cron task's name (to be properly formatted)
-	 * @param int    &$task_date Current Cron task's time of its last execution
+	 * @param object $phpbb_container phpBB container object
+	 * @param string $sk              Sort key
+	 * @param string $sd              Sort direction
+	 * @param string $cron_type       Name of Cron task for execution
 	 */
-	public function get_task_params(array $rows, &$name, &$task_date)
+	public function show_tasks($phpbb_container, $sk, $sd, $cron_type)
 	{
-		$find = strpos($task_name, 'tidy');
-		if ($find !== false)
+		$task_array = array();
+		$tasks = $phpbb_container->get('cron.manager')->get_tasks();
+
+		$rows = $phpbb_container->get('forumhulp.cronstatus.listener')->get_cron_tasks($cronlock);
+
+		if (!sizeof($tasks) || !is_array($rows))
 		{
-			$name = substr($task_name, $find + 5);
-			$name = ($name == 'sessions') ? 'session' : $name;
-			$task_date = (int) $this->array_find($name . '_last_gc', $rows);
-		} else if (strpos($task_name, 'prune_notifications'))
+			return;
+		}
+		
+		/** @var \phpbb\cron\task\task $task */
+		foreach ($tasks as $task)
 		{
-			$task_date = (int) $this->array_find('read_notification_last_gc', $rows);
-			$name = 'read_notification';
-		} else if (strpos($task_name, 'queue'))
+			$this->handle_task($rows, $task, $cronlock, $task_array);
+		}
+		unset($tasks, $rows);
+
+		$task_array = $this->helper->array_sort($task_array, $sk, (($sd == 'a') ? SORT_ASC : SORT_DESC));
+
+		foreach ($task_array as $row)
 		{
-			$task_date = (int) $this->array_find('last_queue_run', $rows);
-			$name = 'queue_interval';
-		} else if (strpos($task_name, 'text_reparser'))
-		{
-			$task_date = (int) $this->array_find(str_replace('cron.task.', '', $task_name) . '_last_cron', $rows);
-			$name = $task_name;
-		} else if (strpos($task_name, 'update_hashes'))
-		{
-			$task_date = (int) $this->array_find(str_replace('cron.task.core.', '', $task_name) . '_last_cron', $rows);
-			$name = $task_name;
-		} else
-		{
-			$name = (strrpos($task_name, ".") !== false) ? substr($task_name, strrpos($task_name, ".") + 1) : $task_name;
-			$task_last_gc = $this->array_find($name . '_last_gc', $rows);
-			$task_date = ($task_last_gc !== false) ? (int) $task_last_gc : 0;
+			$template->assign_block_vars($row['task_sort'], array(
+				'DISPLAY_NAME'	=> $row['display_name'],
+				'TASK_DATE'		=> $row['task_date_print'],
+				'NEW_DATE'		=> $row['new_date_print'],
+				'TASK_OK'		=> $row['task_ok'],
+				'LOCKED'		=> $row['locked'],
+				'CRON_TASK_RUN'	=> ($this->request->is_ajax()) ? '' : (($row['display_name'] != $cron_type) ? '<a href="' . $this->u_action . '&amp;cron_type=' . $row['display_name'] . '&amp;sk=' . $sk . '&amp;sd='. $sd . '" class="cron_run_link">' . $this->user->lang['CRON_TASK_RUN'].'</a>' : '<span class="cron_running_update">' . $this->user->lang['CRON_TASK_RUNNING'] . '</span>'),
+			));
 		}
 	}
 
-	/**
-	 * Calculates next time for Cron task execution
-	 *
-	 * @param array  $rows      Array with fetched parameters for Cron tasks
-	 * @param int    $task_date Microtime of last execution of current Cron task
-	 * @param string $name      Name of current Cron task
-	 * @return int
-	 */
-	public function get_new_task_date(array $rows, $task_date, $name)
-	{
-		$new_task_interval = ($task_date > 0) ? $this->array_find($name . (($name != 'queue_interval') ? '_gc' : ''), $rows) : 0;
-		$new_task_interval = ($task_date > 0) ? $this->array_find(str_replace('cron.task.', '', $name) . (($name == 'text_reparser') ? '_cron_interval': ''), $rows) : 0;
-		$new_task_date = ($new_task_interval > 0) ? $task_date + $new_task_interval : 0;
-		return $new_task_date;
-	}
 
 	/**
-	 * Recursive array sorting based on the second level key
+	 * Calculates parameters for a single Cron task
+	 * and adds them to the resulting $task_array
 	 *
-	 * @param array  $array Array to be sorted
-	 * @param string $on    Second level key for sorting
-	 * @param int    $order Sorting direction (SORT_ASC, SORT_DESC)
-	 * @return array
+	 * @param array                  $rows       Array with fetched parameters for Cron tasks
+	 * @param \phpbb\cron\task\task  $task       Current Cron task object
+	 * @param string                 $cronlock   Name of the Cron task locking the Cron
+	 * @param array                 &$task_array Array of already collected Cron tasks
 	 */
-	public function array_sort($array, $on, $order = SORT_ASC)
+	public function handle_task(array $rows, $task, $cronlock, array &$task_array)
 	{
-		$new_array = array();
-		$sortable_array = array();
-
-		if (sizeof($array) > 0)
+		$task_name = $task->get_name();
+		if (empty($task_name))
 		{
-			foreach ($array as $k => $v)
-			{
-				if (is_array($v))
-				{
-					foreach ($v as $k2 => $v2)
-					{
-						if ($k2 == $on)
-						{
-							$sortable_array[$k] = $v2;
-						}
-					}
-				} else
-				{
-					$sortable_array[$k] = $v;
-				}
-			}
-
-			switch ($order)
-			{
-				case SORT_ASC:
-					asort($sortable_array);
-				break;
-				case SORT_DESC:
-					arsort($sortable_array);
-				break;
-			}
-
-			foreach ($sortable_array as $k => $v)
-			{
-				$new_array[$k] = $array[$k];
-			}
+			return;
 		}
-		return $new_array;
-	}
 
-	/**
-	 * Performs the search for a specific config_name and
-	 * returns the corresponding config_value or false if nothing was found
-	 * Works like array_search with partial matches
-	 *
-	 * @param string $needle   The config_name to search for
-	 * @param array  $haystack The array to search in
-	 * @return mixed
-	 */
-	public function array_find($needle, $haystack)
-	{
-		if (!is_array($haystack))
-		{
-			return false;
-		}
-		foreach ($haystack as $key => $item)
-		{
-			if (strpos($item['config_name'], $needle) !== false)
-			{
-				return $haystack[$key]['config_value'];
-			}
-		}
-		return false;
+		$task_date = -1;
+		$name = $task_name;
+		$this->helper->get_task_params($rows, $task_name, $task_date);
+		$new_task_date = $this->helper->get_new_task_date($rows, $task_date, $name);
+
+		/**
+		* Event to modify task variables before displaying cron information
+		*
+		* @event forumhulp.cronstatus.modify_cron_task
+		* @var object task          Task object
+		* @var object task_name     Task name ($task->get_name())
+		* @var object name          Task name for new task date
+		* @var object task_date     Last task date
+		* @var object new_task_date Next task date
+		* @since 3.1.0-RC3
+		* @changed 3.1.1 Added new_task_date variable
+		*/
+		$vars = array('task', 'task_name', 'name', 'task_date', 'new_task_date');
+		extract($this->phpbb_dispatcher->trigger_event('forumhulp.cronstatus.modify_cron_task', compact($vars)));
+
+		$task_array[] = array(
+			'task_sort'			=> ($task->is_ready()) ? 'ready' : (($task_date) ? 'not_ready' : 'never_started'),
+			'display_name'		=> $task_name,
+			'task_date'			=> $task_date,
+			'task_date_print'	=> ($task_date == -1) ? $this->user->lang['CRON_TASK_AUTO'] : (($task_date) ?
+			$this->user->format_date($task_date, $this->config['cronstatus_dateformat']) : $this->user->lang['CRON_TASK_NEVER_STARTED']),
+			'new_date'			=> $new_task_date,
+			'new_date_print'	=> ($new_task_date > 0 && ($name != 'queue_interval' && $name != 'plupload')) ?
+			$this->user->format_date($new_task_date, $this->config['cronstatus_dateformat']) : '-',
+			'task_ok'			=> ($task_date > 0 && ($new_task_date > time() || ($name == 'queue_interval' || $name == 'plupload'))) ? false : true,
+			'locked'			=> ($this->config['cron_lock'] && $cronlock == $task_name) ? true : false,
+		);
 	}
 }
